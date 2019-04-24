@@ -23,10 +23,12 @@ public class UserEventBus {
     private static UserEventBus mUserEventBus;
     private Map<Object,List<SubscribeMethod>> mCacheMap = null;
     private ExecutorService mExecutorService = null;
+    private Map<Class<?>, Object> mStickyEvents = null;
 
 
     private UserEventBus(){
         mCacheMap = new HashMap<>();
+        mStickyEvents = new HashMap<>();
         mExecutorService = new ThreadPoolExecutor(
                 1, Integer.MAX_VALUE,60,TimeUnit.SECONDS,new SynchronousQueue<Runnable>());
     }
@@ -51,6 +53,25 @@ public class UserEventBus {
             subscribeMethods = getSubscribeMethods(activity);
             mCacheMap.put(activity,subscribeMethods);
         }
+
+        for (SubscribeMethod subscribeMethod : subscribeMethods){
+            if (subscribeMethod.isStickyEvent()){
+                Object event = mStickyEvents.get(subscribeMethod.getEvent());
+                if (event != null){
+                    handlerThreadMsg(event, activity, subscribeMethod);
+                }
+
+            }
+        }
+    }
+
+    public void postSticky(final Object event){
+        //保存到粘性事件Map中
+        synchronized (UserEventBus.class) {
+            mStickyEvents.put(event.getClass(), event);
+        }
+        post(event);
+
     }
 
     public void post(final Object event){
@@ -64,46 +85,50 @@ public class UserEventBus {
             }
             for (final SubscribeMethod subscribeMethod : subscribeMethods) {
                 if (subscribeMethod.getEvent().isAssignableFrom(event.getClass())){
-                    switch (subscribeMethod.getThreadMode()){
-                        case Async:
-                            mExecutorService.execute(new Runnable() {
-                                @Override
-                                public void run() {
-                                    invoke(activity, subscribeMethod,event);
-                                }
-                            });
-                            break;
-                        case MainThread:
-                            //判断当前线程是否是主线程
-                            if (Looper.myLooper() == Looper.getMainLooper()){
-                                invoke(activity, subscribeMethod,event);
-                            }else {
-                                mHandler.post(new Runnable() {
-                                    @Override
-                                    public void run() {
-                                        invoke(activity, subscribeMethod,event);
-                                    }
-                                });
-                            }
-                            break;
-                        case PostThread:
-                            invoke(activity, subscribeMethod,event);
-                            break;
-                        case BackgroundThread:
-                            if (Looper.myLooper() != Looper.getMainLooper()){
-                                invoke(activity, subscribeMethod,event);
-                            }else {
-                                mExecutorService.execute(new Runnable() {
-                                    @Override
-                                    public void run() {
-                                        invoke(activity, subscribeMethod,event);
-                                    }
-                                });
-                            }
-                            break;
-                    }
+                    handlerThreadMsg(event, activity, subscribeMethod);
                 }
             }
+        }
+    }
+
+    private void handlerThreadMsg(final Object event, final Object activity, final SubscribeMethod subscribeMethod) {
+        switch (subscribeMethod.getThreadMode()){
+            case Async:
+                mExecutorService.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        invoke(activity, subscribeMethod,event);
+                    }
+                });
+                break;
+            case MainThread:
+                //判断当前线程是否是主线程
+                if (Looper.myLooper() == Looper.getMainLooper()){
+                    invoke(activity, subscribeMethod,event);
+                }else {
+                    mHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            invoke(activity, subscribeMethod,event);
+                        }
+                    });
+                }
+                break;
+            case PostThread:
+                invoke(activity, subscribeMethod,event);
+                break;
+            case BackgroundThread:
+                if (Looper.myLooper() != Looper.getMainLooper()){
+                    invoke(activity, subscribeMethod,event);
+                }else {
+                    mExecutorService.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            invoke(activity, subscribeMethod,event);
+                        }
+                    });
+                }
+                break;
         }
     }
 
@@ -149,7 +174,9 @@ public class UserEventBus {
                     if (parameterTypes.length != 1){
                         throw new RuntimeException("Subscribe method only receive one parameter");
                     }
-                    subscribeMethods.add(new SubscribeMethod(method, parameterTypes[0], annotation.threadMode()));
+                    subscribeMethods.add(
+                            new SubscribeMethod(method, parameterTypes[0],
+                                    annotation.threadMode(), annotation.sticky()));
                 }
             }
 
